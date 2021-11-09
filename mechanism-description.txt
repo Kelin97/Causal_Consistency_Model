@@ -1,0 +1,67 @@
+Causal Dependency Tracking: Everything described is happening between only 
+the members in each shard, it is essentiall asgn 3 but condensed to each 
+shard list, but to explain what happens in each shard. We used vector 
+clocks for the causal dependency tracking! Almost exactly as explained 
+in lectures, but with some minor modifications. The vector clock was 
+a dictionary (in python), with the address of each replica obtained 
+from the view as the keys, and a number for the values, all initialized 
+to 0. Specifics while system running outlined below.
+
+- CLIENT TO REPLICA PUT: IF the causal-metadata in the PUT is "", or if 
+every value of the sent causal-metadata (vector clock) is equal to or 
+LESS THAN that of the local vector clock of that replica that receives, 
+THEN increment the replicas specific address key in the dictionary, and 
+send it to each replica, with the key-value pair. 
+
+ELSE IF the causal-metadata sent in the PUT is at any key GREATER THAN that of the
+ replicas value, it waits until an update occurs to process and respond ad infinitum. 
+
+- REPLICA TO REPLICA PUT: IF the causal-metadata (vector clock) of the sending 
+replica is EQUAL TO OR LESS THAN that of every element EXCEPT the address in 
+the dictionary correlating with the address of the sending replica (this MUST 
+be +1 of this key compared to the receiving value at this key, in other words 
+VC_sent[A] = VC_receive + 1, where A is the address of the sending replica), 
+THEN we take the vector clocks value at this position and update our own.
+ELSE IF the causal-metadata sent in the PUT is at any key GREATER THAN that of 
+the replicas receiving it, other than the value of the sending replicas address, 
+as described above, OR  VC_sent[A] != VC_receive[A] + 1, where A is the address 
+of the sending replica, then wait until we receive another request that helps us 
+update our vector clock, and keep waiting until this happens forever.
+
+- CLIENT TO REPLICA GET: When a GET is received, the replica sends back the causal-metadata, 
+and the value of course. To the client.
+
+
+Replica down detection: We used try/except blocks paired with HTTP GET requests to 
+fulfill this requirement. We created an endpoint for each replica called "ping" 
+that would return a 200 status code if the request was completed. The purpose of 
+this endpoint was to provide a means to connect to each replica without communicating 
+through the view or key-value store endpoints. 
+  - A helper function was then created to make it easier to call for an update of 
+  replicas down. First the function will loop through all socket addresses currently 
+  in the view and send a GET request, inside a try block, to each of the replica's /ping 
+  endpoint. If the GET request was not completed, an error would be thrown, and inside 
+  the except block the socket address of the downed replica would be removed from the 
+  current view and stored into a list. Once a list of all downed replicas is created, 
+  another loop will run that will broadcast to all currently running replicas a DELETE 
+  request, which communicates to all currently running replicas that a replica is down.
+
+
+Sharding: The mechanism for sharding is to keep a dictionary with keys of the shard id 
+and values as a list of nodes in the keys shard. Each replica has a complete 
+dictionary of what every shard contains. We determine which shard a sent key 
+is in by HASHING, in other words we using sha256 take the hashed value and 
+convert to base 10 int, and modulus it by how many shards there are at the 
+time and add 1. This gives us the shard number of where the value will be 
+stores. So any replica recieving either a GET or a PUT checks if the key is 
+in its own hash, if it is it stores it and sends it to the other nodes in its 
+shard. If it is NOT then it forwards the requet to a node that is in the correct 
+shard and it stores and sends it where necessary and returns the response to 
+the original recieving node. For adding a member we just updated the shard list 
+and view of every node, and sent the new node the correct store, which shard it 
+is in, the shard list and view. For resharding it is done by looping in a circle 
+essentially, adding one node to the first shard, one to the next, and after the 
+last looping back to the first and so on until evry node has been placed in a shard. 
+It throws an error if the number of nodes divided by the shard count is less than 2. 
+Eaach node is then sent the new shard list, the correct store, the correct VC 
+information for each node, and what each shard they now call home :).
